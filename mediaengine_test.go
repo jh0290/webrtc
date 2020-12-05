@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/pion/sdp/v3"
+	"github.com/pion/transport/test"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -63,7 +64,7 @@ a=fmtp:111 minptime=10; useinbandfec=1
 		assert.False(t, m.negotiatedVideo)
 		assert.True(t, m.negotiatedAudio)
 
-		opusCodec, err := m.getCodecByPayload(111)
+		opusCodec, _, err := m.getCodecByPayload(111)
 		assert.NoError(t, err)
 		assert.Equal(t, opusCodec.MimeType, mimeTypeOpus)
 	})
@@ -85,10 +86,10 @@ a=fmtp:112 minptime=10; useinbandfec=1
 		assert.False(t, m.negotiatedVideo)
 		assert.True(t, m.negotiatedAudio)
 
-		_, err := m.getCodecByPayload(111)
+		_, _, err := m.getCodecByPayload(111)
 		assert.Error(t, err)
 
-		opusCodec, err := m.getCodecByPayload(112)
+		opusCodec, _, err := m.getCodecByPayload(112)
 		assert.NoError(t, err)
 		assert.Equal(t, opusCodec.MimeType, mimeTypeOpus)
 	})
@@ -110,7 +111,7 @@ a=fmtp:111 minptime=10; useinbandfec=1
 		assert.False(t, m.negotiatedVideo)
 		assert.True(t, m.negotiatedAudio)
 
-		opusCodec, err := m.getCodecByPayload(111)
+		opusCodec, _, err := m.getCodecByPayload(111)
 		assert.NoError(t, err)
 		assert.Equal(t, opusCodec.MimeType, "audio/OPUS")
 	})
@@ -131,7 +132,7 @@ a=rtpmap:111 opus/48000/2
 		assert.False(t, m.negotiatedVideo)
 		assert.True(t, m.negotiatedAudio)
 
-		opusCodec, err := m.getCodecByPayload(111)
+		opusCodec, _, err := m.getCodecByPayload(111)
 		assert.NoError(t, err)
 		assert.Equal(t, opusCodec.MimeType, mimeTypeOpus)
 	})
@@ -154,14 +155,66 @@ a=rtpmap:111 opus/48000/2
 		assert.False(t, m.negotiatedVideo)
 		assert.True(t, m.negotiatedAudio)
 
-		absID, absAudioEnabled, absVideoEnabled := m.GetHeaderExtensionID(RTPHeaderExtensionCapability{sdp.ABSSendTimeURI})
+		absID, absAudioEnabled, absVideoEnabled := m.getHeaderExtensionID(RTPHeaderExtensionCapability{sdp.ABSSendTimeURI})
 		assert.Equal(t, absID, 0)
 		assert.False(t, absAudioEnabled)
 		assert.False(t, absVideoEnabled)
 
-		midID, midAudioEnabled, midVideoEnabled := m.GetHeaderExtensionID(RTPHeaderExtensionCapability{sdp.SDESMidURI})
+		midID, midAudioEnabled, midVideoEnabled := m.getHeaderExtensionID(RTPHeaderExtensionCapability{sdp.SDESMidURI})
 		assert.Equal(t, midID, 7)
 		assert.True(t, midAudioEnabled)
 		assert.False(t, midVideoEnabled)
+	})
+}
+
+func TestMediaEngineHeaderExtensionDirection(t *testing.T) {
+	report := test.CheckRoutines(t)
+	defer report()
+
+	registerCodec := func(m *MediaEngine) {
+		assert.NoError(t, m.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{mimeTypeOpus, 48000, 0, "", nil},
+				PayloadType:        111,
+			}, RTPCodecTypeAudio))
+	}
+
+	t.Run("No Direction", func(t *testing.T) {
+		m := &MediaEngine{}
+		registerCodec(m)
+		assert.NoError(t, m.RegisterHeaderExtension(RTPHeaderExtensionCapability{"pion-header-test"}, RTPCodecTypeAudio))
+
+		params := m.getRTPParametersByKind(RTPCodecTypeAudio, []RTPTransceiverDirection{RTPTransceiverDirectionRecvonly})
+
+		assert.Equal(t, 1, len(params.HeaderExtensions))
+	})
+
+	t.Run("Same Direction", func(t *testing.T) {
+		m := &MediaEngine{}
+		registerCodec(m)
+		assert.NoError(t, m.RegisterHeaderExtension(RTPHeaderExtensionCapability{"pion-header-test"}, RTPCodecTypeAudio, RTPTransceiverDirectionRecvonly))
+
+		params := m.getRTPParametersByKind(RTPCodecTypeAudio, []RTPTransceiverDirection{RTPTransceiverDirectionRecvonly})
+
+		assert.Equal(t, 1, len(params.HeaderExtensions))
+	})
+
+	t.Run("Different Direction", func(t *testing.T) {
+		m := &MediaEngine{}
+		registerCodec(m)
+		assert.NoError(t, m.RegisterHeaderExtension(RTPHeaderExtensionCapability{"pion-header-test"}, RTPCodecTypeAudio, RTPTransceiverDirectionSendonly))
+
+		params := m.getRTPParametersByKind(RTPCodecTypeAudio, []RTPTransceiverDirection{RTPTransceiverDirectionRecvonly})
+
+		assert.Equal(t, 0, len(params.HeaderExtensions))
+	})
+
+	t.Run("Invalid Direction", func(t *testing.T) {
+		m := &MediaEngine{}
+		registerCodec(m)
+
+		assert.Error(t, m.RegisterHeaderExtension(RTPHeaderExtensionCapability{"pion-header-test"}, RTPCodecTypeAudio, RTPTransceiverDirectionSendrecv), ErrRegisterHeaderExtensionInvalidDirection)
+		assert.Error(t, m.RegisterHeaderExtension(RTPHeaderExtensionCapability{"pion-header-test"}, RTPCodecTypeAudio, RTPTransceiverDirectionInactive), ErrRegisterHeaderExtensionInvalidDirection)
+		assert.Error(t, m.RegisterHeaderExtension(RTPHeaderExtensionCapability{"pion-header-test"}, RTPCodecTypeAudio, RTPTransceiverDirection(0)), ErrRegisterHeaderExtensionInvalidDirection)
 	})
 }
