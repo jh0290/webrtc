@@ -418,11 +418,15 @@ func TestPeerConnection_AnswerWithClosedConnection(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	offerPeerConn, err := NewPeerConnection(Configuration{})
+	offerPeerConn, answerPeerConn, err := newPair()
 	assert.NoError(t, err)
 
-	answerPeerConn, err := NewPeerConnection(Configuration{})
-	assert.NoError(t, err)
+	inChecking, inCheckingCancel := context.WithCancel(context.Background())
+	answerPeerConn.OnICEConnectionStateChange(func(i ICEConnectionState) {
+		if i == ICEConnectionStateChecking {
+			inCheckingCancel()
+		}
+	})
 
 	_, err = offerPeerConn.CreateDataChannel("test-channel", nil)
 	assert.NoError(t, err)
@@ -431,9 +435,11 @@ func TestPeerConnection_AnswerWithClosedConnection(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, offerPeerConn.SetLocalDescription(offer))
 
+	assert.NoError(t, offerPeerConn.Close())
+
 	assert.NoError(t, answerPeerConn.SetRemoteDescription(offer))
 
-	assert.NoError(t, offerPeerConn.Close())
+	<-inChecking.Done()
 	assert.NoError(t, answerPeerConn.Close())
 
 	_, err = answerPeerConn.CreateAnswer(nil)
@@ -1157,4 +1163,41 @@ func TestPeerConnection_MassiveTracks(t *testing.T) {
 	close(stopped)
 	assert.NoError(t, offerPC.Close())
 	assert.NoError(t, answerPC.Close())
+}
+
+func TestEmptyCandidate(t *testing.T) {
+	testCases := []struct {
+		ICECandidate ICECandidateInit
+		expectError  bool
+	}{
+		{ICECandidateInit{"", nil, nil, nil}, false},
+		{ICECandidateInit{
+			"211962667 1 udp 2122194687 10.0.3.1 40864 typ host generation 0",
+			nil, nil, nil,
+		}, false},
+		{ICECandidateInit{
+			"1234567",
+			nil, nil, nil,
+		}, true},
+	}
+
+	for i, testCase := range testCases {
+		peerConn, err := NewPeerConnection(Configuration{})
+		if err != nil {
+			t.Errorf("Case %d: got error: %v", i, err)
+		}
+
+		err = peerConn.SetRemoteDescription(SessionDescription{Type: SDPTypeOffer, SDP: minimalOffer})
+		if err != nil {
+			t.Errorf("Case %d: got error: %v", i, err)
+		}
+
+		if testCase.expectError {
+			assert.Error(t, peerConn.AddICECandidate(testCase.ICECandidate))
+		} else {
+			assert.NoError(t, peerConn.AddICECandidate(testCase.ICECandidate))
+		}
+
+		assert.NoError(t, peerConn.Close())
+	}
 }

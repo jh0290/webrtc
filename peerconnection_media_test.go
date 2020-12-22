@@ -5,6 +5,7 @@ package webrtc
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/pion/randutil"
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/transport/test"
 	"github.com/pion/webrtc/v3/pkg/media"
 	"github.com/stretchr/testify/assert"
@@ -103,7 +105,7 @@ func TestPeerConnection_Media_Sample(t *testing.T) {
 		}()
 
 		go func() {
-			_, routineErr := receiver.Read(make([]byte, 1400))
+			_, _, routineErr := receiver.Read(make([]byte, 1400))
 			if routineErr != nil {
 				awaitRTCPReceiverRecv <- routineErr
 			} else {
@@ -113,7 +115,7 @@ func TestPeerConnection_Media_Sample(t *testing.T) {
 
 		haveClosedAwaitRTPRecv := false
 		for {
-			p, routineErr := track.ReadRTP()
+			p, _, routineErr := track.ReadRTP()
 			if routineErr != nil {
 				close(awaitRTPRecvClosed)
 				return
@@ -166,7 +168,7 @@ func TestPeerConnection_Media_Sample(t *testing.T) {
 	}()
 
 	go func() {
-		if _, routineErr := sender.Read(make([]byte, 1400)); routineErr == nil {
+		if _, _, routineErr := sender.Read(make([]byte, 1400)); routineErr == nil {
 			close(awaitRTCPSenderRecv)
 		}
 	}()
@@ -686,11 +688,11 @@ func TestRtpSenderReceiver_ReadClose_Error(t *testing.T) {
 
 	sender, receiver := tr.Sender(), tr.Receiver()
 	assert.NoError(t, sender.Stop())
-	_, err = sender.Read(make([]byte, 0, 1400))
+	_, _, err = sender.Read(make([]byte, 0, 1400))
 	assert.Error(t, err, io.ErrClosedPipe)
 
 	assert.NoError(t, receiver.Stop())
-	_, err = receiver.Read(make([]byte, 0, 1400))
+	_, _, err = receiver.Read(make([]byte, 0, 1400))
 	assert.Error(t, err, io.ErrClosedPipe)
 
 	assert.NoError(t, pc.Close())
@@ -997,4 +999,73 @@ func TestPeerConnection_Start_Right_Receiver(t *testing.T) {
 
 	assert.NoError(t, pcOffer.Close())
 	assert.NoError(t, pcAnswer.Close())
+}
+
+// Assert that failed Simulcast probing doesn't cause
+// the handleUndeclaredSSRC to be leaked
+func TestPeerConnection_Simulcast_Probe(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	track, err := NewTrackLocalStaticRTP(RTPCodecCapability{MimeType: "video/vp8"}, "video", "pion")
+	assert.NoError(t, err)
+
+	offerer, answerer, err := newPair()
+	assert.NoError(t, err)
+
+	_, err = offerer.AddTrack(track)
+	assert.NoError(t, err)
+
+	ticker := time.NewTicker(time.Millisecond * 20)
+	testFinished := make(chan struct{})
+	seenFiveStreams, seenFiveStreamsCancel := context.WithCancel(context.Background())
+
+	go func() {
+		for {
+			select {
+			case <-testFinished:
+				return
+			case <-ticker.C:
+				answerer.dtlsTransport.lock.Lock()
+				if len(answerer.dtlsTransport.simulcastStreams) >= 5 {
+					seenFiveStreamsCancel()
+				}
+				answerer.dtlsTransport.lock.Unlock()
+
+				track.mu.Lock()
+				if len(track.bindings) == 1 {
+					_, err = track.bindings[0].writeStream.WriteRTP(&rtp.Header{
+						Version: 2,
+						SSRC:    randutil.NewMathRandomGenerator().Uint32(),
+					}, []byte{0, 1, 2, 3, 4, 5})
+					assert.NoError(t, err)
+				}
+				track.mu.Unlock()
+			}
+		}
+	}()
+
+	assert.NoError(t, signalPair(offerer, answerer))
+
+	peerConnectionConnected := sync.WaitGroup{}
+	peerConnectionConnected.Add(2)
+
+	connectionStateHandler := func(connectionState PeerConnectionState) {
+		if connectionState == PeerConnectionStateConnected {
+			peerConnectionConnected.Done()
+		}
+	}
+
+	offerer.OnConnectionStateChange(connectionStateHandler)
+	answerer.OnConnectionStateChange(connectionStateHandler)
+	peerConnectionConnected.Wait()
+
+	<-seenFiveStreams.Done()
+
+	assert.NoError(t, answerer.Close())
+	assert.NoError(t, offerer.Close())
+	close(testFinished)
 }
